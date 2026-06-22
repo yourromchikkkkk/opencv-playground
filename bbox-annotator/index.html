@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Bounding Box Annotator</title>
+<style>
+  :root { font-family: system-ui, sans-serif; }
+  body { margin: 0; display: flex; height: 100vh; background: #1e1e1e; color: #ddd; }
+
+  #sidebar {
+    width: 280px;
+    flex-shrink: 0;
+    padding: 12px;
+    box-sizing: border-box;
+    border-right: 1px solid #444;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  #canvasArea {
+    flex: 1;
+    overflow: auto;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    background:
+      linear-gradient(45deg, #2a2a2a 25%, transparent 25%) -10px 0,
+      linear-gradient(-45deg, #2a2a2a 25%, transparent 25%) -10px 0,
+      linear-gradient(45deg, transparent 75%, #2a2a2a 75%),
+      linear-gradient(-45deg, transparent 75%, #2a2a2a 75%);
+    background-size: 20px 20px;
+    background-color: #252525;
+  }
+
+  #stage { position: relative; margin: 20px; }
+  #image { display: block; user-select: none; max-width: none; }
+  #overlay { position: absolute; top: 0; left: 0; cursor: crosshair; }
+
+  h1 { font-size: 15px; margin: 0 0 4px; color: #fff; }
+  label { font-size: 12px; color: #aaa; }
+  input[type=text], select { width: 100%; box-sizing: border-box; padding: 5px; background: #2c2c2c; color: #eee; border: 1px solid #444; border-radius: 4px; }
+  button { padding: 6px 10px; background: #3a3a3a; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #4a4a4a; }
+  button.primary { background: #2f6fed; border-color: #2f6fed; }
+  button.primary:hover { background: #4a82f5; }
+  button.danger { background: #6e2a2a; border-color: #6e2a2a; }
+  button.danger:hover { background: #8a3636; }
+
+  #fileInput { font-size: 12px; }
+
+  #boxList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; flex: 1; overflow-y: auto; }
+  #boxList li {
+    display: flex; align-items: center; gap: 6px;
+    background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px;
+    padding: 5px 6px; font-size: 12px; cursor: pointer;
+  }
+  #boxList li.selected { border-color: #2f6fed; background: #1f2d44; }
+  #boxList li .swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  #boxList li .meta { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #boxList li .del { background: none; border: none; color: #d77; font-size: 13px; padding: 0 4px; }
+
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+
+  textarea#jsonOut { width: 100%; height: 140px; box-sizing: border-box; font-family: monospace; font-size: 11px; background: #161616; color: #9f9; border: 1px solid #444; border-radius: 4px; resize: vertical; }
+
+  hr { border: none; border-top: 1px solid #3a3a3a; width: 100%; }
+  .hint { font-size: 11px; color: #777; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>Bounding Box Annotator</h1>
+
+  <input id="fileInput" type="file" accept="image/*">
+
+  <div class="row">
+    <label style="display:flex;flex-direction:column;gap:4px;">Class
+      <input id="classInput" type="text" placeholder="e.g. person" value="object">
+    </label>
+  </div>
+
+  <div class="row">
+    <label style="display:flex;flex-direction:column;gap:4px;flex:0 0 80px;">Color
+      <input id="colorInput" type="color" value="#ff3b30" style="padding:0;height:30px;">
+    </label>
+    <label style="display:flex;flex-direction:column;gap:4px;">Zoom
+      <input id="zoomInput" type="range" min="0.25" max="3" step="0.05" value="1">
+    </label>
+  </div>
+
+  <p class="hint">Drag on the image to draw a box. Click a box in the list to select/delete it. Backspace/Delete removes the selected box.</p>
+
+  <hr>
+
+  <strong style="font-size:12px;color:#ccc;">Boxes (<span id="boxCount">0</span>)</strong>
+  <ul id="boxList"></ul>
+
+  <hr>
+
+  <div class="row">
+    <button id="exportBtn" class="primary">Export JSON</button>
+    <button id="clearBtn" class="danger">Clear all</button>
+  </div>
+  <textarea id="jsonOut" readonly placeholder="Exported JSON will appear here..."></textarea>
+</div>
+
+<div id="canvasArea">
+  <div id="stage">
+    <img id="image" alt="">
+    <canvas id="overlay"></canvas>
+  </div>
+</div>
+
+<script>
+(() => {
+  const fileInput = document.getElementById('fileInput');
+  const img = document.getElementById('image');
+  const stage = document.getElementById('stage');
+  const overlay = document.getElementById('overlay');
+  const ctx = overlay.getContext('2d');
+  const classInput = document.getElementById('classInput');
+  const colorInput = document.getElementById('colorInput');
+  const zoomInput = document.getElementById('zoomInput');
+  const boxList = document.getElementById('boxList');
+  const boxCount = document.getElementById('boxCount');
+  const exportBtn = document.getElementById('exportBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const jsonOut = document.getElementById('jsonOut');
+
+  let naturalW = 0, naturalH = 0;
+  let zoom = 1;
+  let boxes = []; // {x,y,w,h,label,color} in natural image-pixel coordinates
+  let selectedId = -1;
+  let nextId = 1;
+  let drawing = null; // {startX, startY} in natural coords
+
+  function loadImage(file) {
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      naturalW = img.naturalWidth;
+      naturalH = img.naturalHeight;
+      boxes = [];
+      selectedId = -1;
+      applyZoom();
+      render();
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  }
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) loadImage(file);
+  });
+
+  function applyZoom() {
+    zoom = parseFloat(zoomInput.value);
+    const w = naturalW * zoom;
+    const h = naturalH * zoom;
+    img.style.width = w + 'px';
+    img.style.height = h + 'px';
+    overlay.width = w;
+    overlay.height = h;
+    overlay.style.width = w + 'px';
+    overlay.style.height = h + 'px';
+  }
+
+  zoomInput.addEventListener('input', () => { applyZoom(); render(); });
+
+  function naturalToScreen(p) { return p * zoom; }
+  function screenToNatural(p) { return p / zoom; }
+
+  function getOverlayPoint(evt) {
+    const rect = overlay.getBoundingClientRect();
+    const sx = evt.clientX - rect.left;
+    const sy = evt.clientY - rect.top;
+    return {
+      x: clamp(screenToNatural(sx), 0, naturalW),
+      y: clamp(screenToNatural(sy), 0, naturalH)
+    };
+  }
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  overlay.addEventListener('mousedown', (evt) => {
+    if (!naturalW) return;
+    const p = getOverlayPoint(evt);
+    drawing = { startX: p.x, startY: p.y };
+    selectedId = -1;
+    render();
+  });
+
+  window.addEventListener('mousemove', (evt) => {
+    if (!drawing) return;
+    const p = getOverlayPoint(evt);
+    drawing.curX = p.x;
+    drawing.curY = p.y;
+    render();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!drawing) return;
+    const { startX, startY, curX = startX, curY = startY } = drawing;
+    const x = Math.min(startX, curX);
+    const y = Math.min(startY, curY);
+    const w = Math.abs(curX - startX);
+    const h = Math.abs(curY - startY);
+    drawing = null;
+    if (w >= 4 && h >= 4) {
+      const box = {
+        id: nextId++,
+        x, y, w, h,
+        label: classInput.value.trim() || 'object',
+        color: colorInput.value
+      };
+      boxes.push(box);
+      selectedId = box.id;
+      renderList();
+    }
+    render();
+  });
+
+  window.addEventListener('keydown', (evt) => {
+    if ((evt.key === 'Delete' || evt.key === 'Backspace') && selectedId !== -1) {
+      const active = document.activeElement;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      boxes = boxes.filter(b => b.id !== selectedId);
+      selectedId = -1;
+      renderList();
+      render();
+    }
+  });
+
+  function render() {
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    for (const b of boxes) {
+      drawBox(b, b.id === selectedId);
+    }
+    if (drawing) {
+      const { startX, startY, curX = startX, curY = startY } = drawing;
+      const x = Math.min(startX, curX), y = Math.min(startY, curY);
+      const w = Math.abs(curX - startX), h = Math.abs(curY - startY);
+      ctx.save();
+      ctx.strokeStyle = colorInput.value;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(naturalToScreen(x), naturalToScreen(y), naturalToScreen(w), naturalToScreen(h));
+      ctx.restore();
+    }
+  }
+
+  function drawBox(b, isSelected) {
+    const sx = naturalToScreen(b.x), sy = naturalToScreen(b.y);
+    const sw = naturalToScreen(b.w), sh = naturalToScreen(b.h);
+    ctx.save();
+    ctx.strokeStyle = b.color;
+    ctx.lineWidth = isSelected ? 3 : 2;
+    ctx.strokeRect(sx, sy, sw, sh);
+    ctx.font = '12px sans-serif';
+    const text = b.label;
+    const textW = ctx.measureText(text).width + 8;
+    ctx.fillStyle = b.color;
+    ctx.fillRect(sx, sy - 16, textW, 16);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, sx + 4, sy - 4);
+    ctx.restore();
+  }
+
+  function renderList() {
+    boxCount.textContent = boxes.length;
+    boxList.innerHTML = '';
+    for (const b of boxes) {
+      const li = document.createElement('li');
+      if (b.id === selectedId) li.classList.add('selected');
+      li.innerHTML = `
+        <span class="swatch" style="background:${b.color}"></span>
+        <span class="meta">${escapeHtml(b.label)} — ${Math.round(b.w)}×${Math.round(b.h)} @ (${Math.round(b.x)},${Math.round(b.y)})</span>
+        <button class="del" title="Delete">✕</button>
+      `;
+      li.addEventListener('click', (e) => {
+        if (e.target.classList.contains('del')) {
+          boxes = boxes.filter(x => x.id !== b.id);
+          if (selectedId === b.id) selectedId = -1;
+        } else {
+          selectedId = b.id;
+        }
+        renderList();
+        render();
+      });
+      boxList.appendChild(li);
+    }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  exportBtn.addEventListener('click', () => {
+    const data = {
+      image: { width: naturalW, height: naturalH },
+      boxes: boxes.map(({ x, y, w, h, label }) => ({
+        label,
+        x: Math.round(x), y: Math.round(y),
+        width: Math.round(w), height: Math.round(h)
+      }))
+    };
+    jsonOut.value = JSON.stringify(data, null, 2);
+  });
+
+  clearBtn.addEventListener('click', () => {
+    boxes = [];
+    selectedId = -1;
+    renderList();
+    render();
+    jsonOut.value = '';
+  });
+})();
+</script>
+</body>
+</html>
